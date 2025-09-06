@@ -1,48 +1,74 @@
-import json
+import time
+import schedule
 from tronpy import Tron
 from tronpy.keys import PrivateKey
+import logging
 
-# Konfigurasi
-main_account = "YOUR_MAIN_ACCOUNT_ADDRESS"
-private_key = "YOUR_PRIVATE_KEY"  # Harus berupa hex string tanpa '0x'
-tron_network = "https://api.trongrid.io"  # Mainnet. Gunakan "https://api.shasta.trongrid.io" untuk testnet
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Fungsi untuk mengirim TRX atau USDT (TRC20)
-def send_trx_or_usdt(private_key, amount, recipient_address, contract_address=None):
-    client = Tron(network=tron_network)
-    priv_key = PrivateKey(bytes.fromhex(private_key))
-    
-    if contract_address:
-        # Kirim USDT (TRC20)
-        usdt_contract = client.get_contract(contract_address)
+# Inisialisasi client Tron
+client = Tron()
+
+# Alamat kontrak USDT TRC20 di jaringan TRON mainnet
+USDT_CONTRACT = 'TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj'
+
+# Alamat tujuan pengiriman USDT
+main_account = 'TKSXDA8HfE9E1y39RczVQ1ZascUEtaSToF'
+
+# Daftar akun yang akan dicek dan dikirim USDT-nya
+accounts = {
+    'YOUR_ADDRESS_1': 'YOUR_PRIVATE_KEY_1',
+    'YOUR_ADDRESS_2': 'YOUR_PRIVATE_KEY_2',
+    # Tambah sesuai kebutuhan
+}
+
+# Minimal saldo USDT untuk trigger pengiriman (dalam USDT, bukan SUN)
+min_withdraw = 1.0
+
+# Interval pengecekan dalam detik
+scan_interval = 60
+
+def send_usdt(private_key_str, to_address, amount):
+    try:
+        priv_key = PrivateKey(bytes.fromhex(private_key_str))
+        wallet = client.get_account(priv_key.public_key.to_base58check_address())
+        contract = client.get_contract(USDT_CONTRACT)
+
+        # USDT TRC20 punya 6 desimal
+        amount_in_token = int(amount * 10**6)
+
         txn = (
-            usdt_contract.functions.transfer(recipient_address, int(amount * 10**6))
-            .with_owner(main_account)
-            .fee_limit(2_000_000)
+            contract.functions.transfer(to_address, amount_in_token)
+            .with_owner(priv_key.public_key.to_base58check_address())
+            .fee_limit(10_000_000)  # fee limit 10 TRX
             .build()
             .sign(priv_key)
         )
-    else:
-        # Kirim TRX
-        txn = (
-            client.trx.transfer(main_account, recipient_address, int(amount * 10**6))
-            .build()
-            .sign(priv_key)
-        )
+        result = txn.broadcast().wait()
+        if result['result']:
+            logging.info(f"Transfer {amount} USDT berhasil dari {wallet['address']} ke {to_address}")
+        else:
+            logging.error(f"Transfer gagal: {result}")
+    except Exception as e:
+        logging.error(f"Error saat transfer USDT: {e}")
 
-    result = client.trx.broadcast(txn)
-    return result
+def check_and_send():
+    for address, priv_key in accounts.items():
+        try:
+            balance = client.get_token_balance(USDT_CONTRACT, address)
+            balance_usdt = balance / 10**6  # konversi ke USDT
+            logging.info(f"Saldo USDT {address}: {balance_usdt}")
+            if balance_usdt >= min_withdraw:
+                logging.info(f"Saldo cukup, mengirim {balance_usdt} USDT ke {main_account}")
+                send_usdt(priv_key, main_account, balance_usdt)
+            else:
+                logging.info(f"Saldo kurang dari {min_withdraw} USDT, skip pengiriman.")
+        except Exception as e:
+            logging.error(f"Error cek saldo {address}: {e}")
 
-# Konfigurasi pengiriman
-recipient_address = "RECIPIENT_ADDRESS"
-amount = 10  # Jumlah TRX atau USDT
-usdt_contract_address = "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj"  # Kontrak USDT di Tron mainnet
+logging.info("Memulai auto-send USDT dengan interval {} detik".format(scan_interval))
+schedule.every(scan_interval).seconds.do(check_and_send)
 
-# Contoh: Kirim USDT
-# result = send_trx_or_usdt(private_key, amount, recipient_address, usdt_contract_address)
-
-# Contoh: Kirim TRX
-# result = send_trx_or_usdt(private_key, amount, recipient_address)
-
-# Uncomment sesuai kebutuhan
-# print(result)
+while True:
+    schedule.run_pending()
+    time.sleep(1)
